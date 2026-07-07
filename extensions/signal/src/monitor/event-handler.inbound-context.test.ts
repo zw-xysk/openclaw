@@ -31,6 +31,7 @@ const {
   dispatchInboundMessageMock,
   enqueueSystemEventMock,
   recordInboundSessionMock,
+  runtimeErrorMock,
   capture,
 } = vi.hoisted(() => {
   const captureState: { ctx?: MsgContext } = {};
@@ -41,6 +42,7 @@ const {
     removeReactionSignalMock: vi.fn(async () => ({ ok: true })),
     enqueueSystemEventMock: vi.fn(),
     recordInboundSessionMock: vi.fn(),
+    runtimeErrorMock: vi.fn(),
     dispatchInboundMessageMock: vi.fn(async (params: DispatchInboundMessageMockParams) => {
       captureState.ctx = params.ctx;
       await Promise.resolve(params.replyOptions?.onReplyStart?.());
@@ -133,6 +135,7 @@ describe("signal createSignalEventHandler inbound context", () => {
     enqueueSystemEventMock.mockReset();
     recordInboundSessionMock.mockReset().mockResolvedValue(undefined);
     dispatchInboundMessageMock.mockClear();
+    runtimeErrorMock.mockClear();
     approvalReactionMocks.maybeResolveSignalApprovalReaction.mockReset().mockResolvedValue(false);
   });
 
@@ -2144,4 +2147,294 @@ describe("signal createSignalEventHandler inbound context", () => {
     expect(capture.ctx).toBeUndefined();
     expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
   });
+
+  // ── flushWithRetry: retry on reply session init conflict ─────
+  //
+  // flushWithRetry wraps handleSignalInboundMessage to catch
+  // "reply session initialization conflicted" errors and retry
+  // with 1s backoff (max SIGNAL_RETRY_FLUSH_MAX_ATTEMPTS = 3).
+  // These tests prove the retry mechanism through the real debouncer
+  // and real handleSignalInboundMessage, with only dispatchInboundMessage
+  // mocked (to inject the conflict error).
+
+  const RETRY_CONFLICT_MSG =
+    "reply session initialization conflicted for agent:main:signal:direct:+15550001111";
+
+  function makeConflictError(): Error {
+    return new Error("dispatch failed", {
+      cause: new Error(RETRY_CONFLICT_MSG),
+    });
+  }
+
+  it("wraps a conflict failure and succeeds on retry", async () => {
+    vi.useFakeTimers();
+    try {
+      dispatchInboundMessageMock
+        .mockRejectedValueOnce(makeConflictError())
+        .mockRejectedValueOnce(makeConflictError())
+        .mockResolvedValueOnce({
+          queuedFinal: false,
+          counts: { tool: 0, block: 0, final: 0 },
+        });
+
+      const handler = createSignalEventHandler(
+        createBaseSignalEventHandlerDeps({
+          cfg: {
+            messages: { inbound: { debounceMs: 0 } },
+            channels: { signal: { dmPolicy: "open", allowFrom: ["*"] } },
+          },
+          historyLimit: 0,
+          runtime: { log: () => {}, error: runtimeErrorMock } as any,
+        }),
+      );
+
+      const handled = handler(
+        createSignalReceiveEvent({
+          dataMessage: { message: "conflict then retry", attachments: [] },
+        }),
+      );
+
+      // Debounce fires at 0ms → flushWithRetry → dispatchInboundMessage fails → delay(1000)
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(1);
+
+      // Retry 1: still fails
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(2);
+
+      // Retry 2: succeeds
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(3);
+
+      // Handler resolves successfully — retry succeeded
+      await expect(handled).resolves.toBeUndefined();
+      expect(runtimeErrorMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it("does not retry non-retryable errors", async () => {
+    vi.useFakeTimers();
+    try {
+      dispatchInboundMessageMock.mockRejectedValue(
+        new Error("database connection timeout"),
+      );
+
+      const handler = createSignalEventHandler(
+        createBaseSignalEventHandlerDeps({
+          cfg: {
+            messages: { inbound: { debounceMs: 0 } },
+            channels: { signal: { dmPolicy: "open", allowFrom: ["*"] } },
+          },
+          historyLimit: 0,
+          runtime: { log: () => {}, error: runtimeErrorMock } as any,
+        }),
+      );
+
+      const handled = handler(
+        createSignalReceiveEvent({
+          dataMessage: { message: "non-retryable", attachments: [] },
+        }),
+      );
+
+      // Debounce fires → dispatchInboundMessage fails → NOT retryable → throws
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(1);
+
+      // Advance well past any retry window — no retry should happen
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(1);
+
+      await expect(handled).resolves.toBeUndefined();
+      expect(runtimeErrorMock).toHaveBeenCalledTimes(1);
+      expect(runtimeErrorMock.mock.calls[0]?.[0]).toContain(
+        "signal debounce flush failed",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it("exhausts retries after max attempts on persistent conflict", async () => {
+    vi.useFakeTimers();
+    try {
+      // All 4 calls (1 initial + 3 retries) fail with conflict
+      dispatchInboundMessageMock
+        .mockRejectedValueOnce(makeConflictError())
+        .mockRejectedValueOnce(makeConflictError())
+        .mockRejectedValueOnce(makeConflictError())
+        .mockRejectedValueOnce(makeConflictError());
+
+      const handler = createSignalEventHandler(
+        createBaseSignalEventHandlerDeps({
+          cfg: {
+            messages: { inbound: { debounceMs: 0 } },
+            channels: { signal: { dmPolicy: "open", allowFrom: ["*"] } },
+          },
+          historyLimit: 0,
+          runtime: { log: () => {}, error: runtimeErrorMock } as any,
+        }),
+      );
+
+      const handled = handler(
+        createSignalReceiveEvent({
+          dataMessage: {
+            message: "persistent conflict",
+            attachments: [],
+          },
+        }),
+      );
+
+      // Initial attempt
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(1);
+
+      // Retry 1
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(2);
+
+      // Retry 2
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(3);
+
+      // Retry 3 — exhausted
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(4);
+
+      await expect(handled).resolves.toBeUndefined();
+      expect(runtimeErrorMock).toHaveBeenCalledTimes(1);
+      expect(runtimeErrorMock.mock.calls[0]?.[0]).toContain(
+        "signal debounce flush failed",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it("uses original entry in retry, not overridden by later same-key DM", async () => {
+    vi.useFakeTimers();
+    try {
+      const bodies: string[] = [];
+      dispatchInboundMessageMock.mockImplementation(
+        async (params) => {
+          bodies.push(params.ctx.BodyForAgent ?? "");
+          if (bodies.length === 1) {
+            throw makeConflictError();
+          }
+          return {
+            queuedFinal: false,
+            counts: { tool: 0, block: 0, final: 0 },
+          };
+        },
+      );
+
+      const handler = createSignalEventHandler(
+        createBaseSignalEventHandlerDeps({
+          cfg: {
+            messages: { inbound: { debounceMs: 0 } },
+            channels: { signal: { dmPolicy: "open", allowFrom: ["*"] } },
+          },
+          historyLimit: 0,
+          runtime: { log: () => {}, error: runtimeErrorMock } as any,
+        }),
+      );
+
+      // Send first DM (from sender +15550001111)
+      const handled1 = handler(
+        createSignalReceiveEvent({
+          timestamp: 1700000000000,
+          sourceNumber: "+15550001111",
+          dataMessage: { message: "first msg", attachments: [] },
+        }),
+      );
+
+      // Debounce fires → flushWithRetry → dispatchInboundMessage #1 (first) → conflict → delay(1000)
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(1);
+      expect(bodies[0]).toContain("first msg");
+
+      // During retry delay, send second DM from same sender.
+      // The debouncer serializes same-key items, so the second DM is
+      // queued and waits for the first flush to complete.
+      const handled2 = handler(
+        createSignalReceiveEvent({
+          timestamp: 1700000000001,
+          sourceNumber: "+15550001111",
+          dataMessage: { message: "second msg", attachments: [] },
+        }),
+      );
+
+      // Advance past first DM's retry delay → retry fires → dispatchInboundMessage #2
+      // (first msg retry, succeeds) → first flush complete → second DM flush →
+      // dispatchInboundMessage #3 (second msg, succeeds)
+      await vi.advanceTimersByTimeAsync(1000);
+
+      // All 3 dispatches completed (initial fail, second DM success, retry success)
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(3);
+      expect(bodies[0]).toContain("first msg");
+      expect(bodies[1]).toContain("second msg");
+      expect(bodies[2]).toContain("first msg");
+
+      await expect(handled1).resolves.toBeUndefined();
+      await expect(handled2).resolves.toBeUndefined();
+      expect(runtimeErrorMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it("proves retry does not duplicate session records or final dispatch", async () => {
+    vi.useFakeTimers();
+    try {
+      // Track calls: dispatchInboundMessage, recordInboundSession
+      dispatchInboundMessageMock
+        .mockRejectedValueOnce(makeConflictError())
+        .mockRejectedValueOnce(makeConflictError())
+        .mockResolvedValueOnce({
+          queuedFinal: false,
+          counts: { tool: 0, block: 0, final: 0 },
+        });
+
+      const handler = createSignalEventHandler(
+        createBaseSignalEventHandlerDeps({
+          cfg: {
+            messages: { inbound: { debounceMs: 0 } },
+            channels: { signal: { dmPolicy: "open", allowFrom: ["*"] } },
+          },
+          historyLimit: 0,
+          runtime: { log: () => {}, error: runtimeErrorMock } as any,
+        }),
+      );
+
+      const handled = handler(
+        createSignalReceiveEvent({
+          dataMessage: { message: "no duplication", attachments: [] },
+        }),
+      );
+
+      // Debounce fires at 0ms → flushWithRetry → dispatchInboundMessage fails → delay(1000)
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Retry 1: fails
+      await vi.advanceTimersByTimeAsync(1000);
+
+      // Retry 2: succeeds
+      await vi.advanceTimersByTimeAsync(1000);
+
+      await expect(handled).resolves.toBeUndefined();
+
+      // dispatchInboundMessage called exactly 3 times (1 initial + 2 retries)
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(3);
+
+      // recordInboundSession is called per handleSignalInboundMessage invocation
+      // (each retry re-enters handleSignalInboundMessage fully)
+      expect(recordInboundSessionMock).toHaveBeenCalledTimes(3);
+
+      // runtime.error NOT called — retry succeeded
+      expect(runtimeErrorMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
 });

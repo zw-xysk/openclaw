@@ -202,7 +202,7 @@ const SIGNAL_RETRY_FLUSH_MAX_ATTEMPTS = 3;
 const SIGNAL_RETRY_FLUSH_RETRY_DELAY_MS = 1_000;
 const REPLY_SESSION_INIT_CONFLICT_MESSAGE_RE = /reply session initialization conflicted for \S+/u;
 
-export function isRetryableSignalInboundError(error: unknown): boolean {
+function isRetryableSignalInboundError(error: unknown): boolean {
   return collectErrorGraphCandidates(error, (current) => [current.cause, current.error]).some(
     (candidate) => REPLY_SESSION_INIT_CONFLICT_MESSAGE_RE.test(formatErrorMessage(candidate)),
   );
