@@ -1188,7 +1188,7 @@ Second paragraph should still reach the agent after Slack's preview cutoff.`;
     expect(prepared).toBeNull();
   });
 
-  it("delivers file-only message with placeholder when media download fails", async () => {
+  it("delivers file-only message with unavailable placeholder when media download fails", async () => {
     // Files without url_private will fail to download, simulating a download
     // failure.  The message should still be delivered with a fallback
     // placeholder instead of being silently dropped (#25064).
@@ -1203,9 +1203,32 @@ Second paragraph should still reach the agent after Slack's preview cutoff.`;
     );
 
     assertPrepared(prepared);
-    expect(prepared.ctxPayload.RawBody).toContain("[Slack file:");
+    expect(prepared.ctxPayload.RawBody).toContain("[Slack media unavailable:");
     expect(prepared.ctxPayload.RawBody).toContain("voice.ogg (fileId: FVOICE)");
     expect(prepared.ctxPayload.RawBody).toContain("photo.jpg (fileId: FPHOTO)");
+  });
+
+  it("keeps attachment-only messages when every attachment media fetch fails", async () => {
+    const result = await resolveSlackMessageContent({
+      message: {
+        type: "message",
+        channel: "C1",
+        channel_type: "channel",
+        user: "U1",
+        text: "",
+        attachments: [{ is_share: true, image_url: "https://files.slack.com/missing.png" }],
+        ts: "1700000000.0005",
+        event_ts: "1700000000.0005",
+      } as SlackMessageEvent,
+      isThreadReply: false,
+      threadStarter: null,
+      isBotMessage: false,
+      botToken: "xoxb-test",
+      mediaMaxBytes: 1000,
+    });
+
+    expect(result?.rawBody).toBe("[Slack media unavailable: 1 attachment(s)]");
+    expect(result?.effectiveDirectMedia).toBeNull();
   });
 
   it("falls back to generic file label when a Slack file name is empty", async () => {
@@ -1217,7 +1240,7 @@ Second paragraph should still reach the agent after Slack's preview cutoff.`;
     );
 
     assertPrepared(prepared);
-    expect(prepared.ctxPayload.RawBody).toContain("[Slack file: file]");
+    expect(prepared.ctxPayload.RawBody).toContain("[Slack media unavailable: file]");
   });
 
   it("extracts attachment text for bot messages with empty text when allowBots is true (#27616)", async () => {

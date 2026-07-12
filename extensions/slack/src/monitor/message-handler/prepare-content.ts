@@ -137,6 +137,9 @@ export async function resolveSlackMessageContent(params: {
     : undefined;
 
   const fallbackFiles = ownFiles ?? [];
+  // Downloads can all fail while Slack still lists files on the event. Keep a body so
+  // prepare() does not drop the turn, and mark it unavailable so agents do not treat the
+  // reference as successfully fetched media.
   const fileOnlyFallback =
     !mediaPlaceholder && fallbackFiles.length > 0
       ? fallbackFiles
@@ -144,7 +147,9 @@ export async function resolveSlackMessageContent(params: {
           .map((file) => formatSlackFileReference(file))
           .join(", ")
       : undefined;
-  const fileOnlyPlaceholder = fileOnlyFallback ? `[Slack file: ${fileOnlyFallback}]` : undefined;
+  const fileOnlyPlaceholder = fileOnlyFallback
+    ? `[Slack media unavailable: ${fileOnlyFallback}]`
+    : undefined;
 
   let botAttachmentText: string | undefined;
   if (params.isBotMessage && !attachmentContent?.text) {
@@ -197,6 +202,19 @@ export async function resolveSlackMessageContent(params: {
   const renderedAttachmentText = renderSlackUserMentions(textParts[1], renderedMentions);
   const renderedBotAttachmentText = renderSlackUserMentions(textParts[2], renderedMentions);
 
+  const attachmentCount = params.message.attachments?.length ?? 0;
+  const attachmentMediaUnavailable =
+    attachmentCount > 0 &&
+    !renderedMessageText &&
+    !renderedAttachmentText &&
+    !renderedBotAttachmentText &&
+    !mediaPlaceholder &&
+    !fileOnlyPlaceholder &&
+    !attachmentContent?.media?.length;
+  const attachmentUnavailablePlaceholder = attachmentMediaUnavailable
+    ? `[Slack media unavailable: ${attachmentCount} attachment(s)]`
+    : undefined;
+
   const rawBody =
     [
       renderedMessageText,
@@ -204,6 +222,7 @@ export async function resolveSlackMessageContent(params: {
       renderedBotAttachmentText,
       mediaPlaceholder,
       fileOnlyPlaceholder,
+      attachmentUnavailablePlaceholder,
     ]
       .filter(Boolean)
       .join("\n") || "";
