@@ -91,6 +91,7 @@ vi.mock("openclaw/plugin-sdk/plugin-runtime", async (importOriginal) => {
   return { ...actual, getGlobalHookRunner: getGlobalHookRunnerMock };
 });
 vi.mock("./send.js", () => ({
+  deleteMessageFeishu: vi.fn(),
   sendMessageFeishu: sendMessageFeishuMock,
   sendMarkdownCardFeishu: sendMarkdownCardFeishuMock,
   sendStructuredCardFeishu: sendStructuredCardFeishuMock,

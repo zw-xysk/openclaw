@@ -397,6 +397,7 @@ vi.mock("./reasoning-preview.js", () => ({
 }));
 
 vi.mock("./send.js", () => ({
+  deleteMessageFeishu: vi.fn(),
   sendMessageFeishu: mockSendMessageFeishu,
   getMessageFeishu: mockGetMessageFeishu,
   listFeishuThreadMessages: mockListFeishuThreadMessages,

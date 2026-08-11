@@ -23,6 +23,7 @@ import {
   removeReactionFeishu as removeReactionFeishuImpl,
 } from "./reactions.js";
 import {
+  deleteMessageFeishu as deleteMessageFeishuImpl,
   editMessageFeishu as editMessageFeishuImpl,
   getMessageFeishu as getMessageFeishuImpl,
   sendCardFeishu as sendCardFeishuImpl,
@@ -45,6 +46,7 @@ export const feishuChannelRuntime = {
   getChatInfo: getChatInfoImpl,
   getChatMembers: getChatMembersImpl,
   getFeishuMemberInfo: getFeishuMemberInfoImpl,
+  deleteMessageFeishu: deleteMessageFeishuImpl,
   editMessageFeishu: editMessageFeishuImpl,
   getMessageFeishu: getMessageFeishuImpl,
   sendCardFeishu: sendCardFeishuImpl,

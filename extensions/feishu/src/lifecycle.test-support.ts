@@ -177,6 +177,7 @@ vi.mock("./reply-dispatcher.js", () => ({
 }));
 
 vi.mock("./send.js", () => ({
+  deleteMessageFeishu: vi.fn(),
   sendCardFeishu: sendCardFeishuMock,
   getMessageFeishu: getMessageFeishuMock,
   listFeishuThreadMessages: listFeishuThreadMessagesMock,
